@@ -1,4 +1,4 @@
-<h1><u>blvdiff (formerly blvflag)</u></h1>
+<h1><u>blvdiff (formerly blvflag) - Windows </u></h1>
 
 <h2>About:</h2>
 
@@ -21,7 +21,9 @@
 
 <h2>Install:</h2>
 
-Note only for <b>Linux</b> and <b>MacOs</b>.
+Note: This version is for Windows only.
+
+For Mac/Linux support: <a href="https://github.com/rylansedlacek/blvflag"> blvdiff </a>
 
 <h3>Steps:</h3>
 

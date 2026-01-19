@@ -1,0 +1,64 @@
+use std::io::{self};
+use std::process::{Command, Stdio};
+use std::io::{BufRead};
+use std::thread;
+use std::time::Duration;
+
+pub enum OutputType {
+    Stdout,
+    Stderr,
+}
+
+pub fn run_script(script_path: &str) -> io::Result<(OutputType, String)> { // to pipe the script given
+
+    let output = Command::new("python3") 
+        .arg(script_path)
+        .stdout(Stdio::piped()) // for stdout
+        .stderr(Stdio::piped()) // for stderr
+        .output()?;
+
+    let out; 
+    if output.status.success() {
+        out = (OutputType::Stdout, String::from_utf8_lossy(&output.stdout).to_string()); // standard out
+    } else {
+        out = (OutputType::Stderr, String::from_utf8_lossy(&output.stderr).to_string()); // stand error out
+    }
+    Ok(out) // return out as string back to main for model processing.
+
+} // end runScript
+
+/*
+pub fn start_ollama_server() -> io::Result<()> {
+
+    let mut process = Command::new("ollama")
+        .arg("serve")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?; 
+
+
+    if let Some(stdout) = process.stdout.take() {
+        let reader = io::BufReader::new(stdout);
+        thread::spawn(move || {
+            for _line in reader.lines().flatten() {
+                thread::sleep(Duration::from_secs(8));
+                continue;
+            }
+        });
+    }
+
+    if let Some(stderr) = process.stderr.take() { // for DEBUG only
+        let reader = io::BufReader::new(stderr);
+        thread::spawn(move || {
+            for _line in reader.lines().flatten() {
+                //eprintln!("[OLLAMA ERROR] {}", line); 
+                thread::sleep(Duration::from_secs(8));
+                continue;
+            }
+        });
+    }
+
+    thread::sleep(Duration::from_secs(5));
+    Ok(())
+} // end start
+*/

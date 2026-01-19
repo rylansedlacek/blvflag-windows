@@ -1,0 +1,392 @@
+use crate::commands;
+use crate::diff;
+
+use indicatif::{ProgressBar, ProgressStyle};
+use ollama_rs::{generation::completion::{request::GenerationRequest, GenerationContext, GenerationResponseStream,},Ollama,};
+use std::error::Error;
+use tokio::io::{AsyncWriteExt, Stdout};
+use tokio_stream::StreamExt;
+use std::fs;
+use std::path::{Path, PathBuf};
+use chrono::Local;
+use dirs;
+use std::time::Instant;
+use std::fs::OpenOptions;
+use std::io::Write;
+use serde_json::json;
+
+pub async fn process_script(script_path: &str, explain: bool, diff: bool) -> Result<(), Box<dyn Error>> {
+    let out = commands::run_script(script_path);
+
+    //-------------------------
+    //TODO REMOVE AFTER TESTING
+    let start = Instant::now();
+    //-------------------------
+
+    match out {
+            //Standard Out
+            Ok((commands::OutputType::Stdout, output)) => { 
+
+                if !diff { println!("{}", output); } // if we dont have a flag just give back
+        
+                let script_name = Path::new(script_path).file_name().unwrap().to_string_lossy().to_string();
+                let date_stamp = Local::now().to_string();
+
+                let mut history_dir: PathBuf = dirs::home_dir().expect("Failed to get home directory");
+                history_dir.push("blvflag/tool/history/err_history"); // create the std_history dir if it DOESNT EXIST
+                fs::create_dir_all(&history_dir)?;
+            
+                let json_name = format!("{}_{}.json", script_name.trim_end_matches(".py"), date_stamp); // dating format
+                let full_path = history_dir.join(&json_name); 
+                let current_script_content = fs::read_to_string(script_path)?; // stringify all contents 
+
+                /*
+                    Here we are going to read through both of the history sub dirs, std_history & err_history.
+                    This allows use to get the MOST recent file that has been saved from our check. It's going
+                    to save regardless of std_out or std_err.
+
+                    TODO, make the search and saving happen only once above the match block!
+                */
+
+                let prefix = script_name.trim_end_matches(".py");
+                let mut all_versions: Vec<PathBuf> = vec![];
+            
+                    let std_history_dir = dirs::home_dir().unwrap().join("blvflag/tool/history/std_history");
+                    let std_versions = fs::read_dir(&std_history_dir)? // read the users std dir
+                        .filter_map(|entry| {
+                            let path = entry.ok()?.path();
+                            let fname = path.file_name()?.to_string_lossy();
+                            if fname.starts_with(prefix) {
+                                Some(path) 
+                            } else { 
+                                None // TODO unsure if this is good practice.
+                            }
+                        }); // end std read
+            
+                    let err_history_dir = dirs::home_dir().unwrap().join("blvflag/tool/history/err_history");
+                    let err_versions = fs::read_dir(&err_history_dir)? // read the users std out dir
+                        .filter_map(|entry| {
+                            let path = entry.ok()?.path();
+                            let fname = path.file_name()?.to_string_lossy();
+                            if fname.starts_with(prefix) { 
+                                Some(path) 
+                            } else { 
+                                None 
+                            }
+                        }); // end err read
+            
+                    all_versions.extend(std_versions); // append std
+                    all_versions.extend(err_versions); // append err
+                    all_versions.sort(); // sort to get the most recent
+            
+                    let mut should_save = true;
+                    if let Some(last_version) = all_versions.last() {
+                        let previous_content = fs::read_to_string(last_version)?; // stringify for compare
+                        if previous_content != current_script_content {
+                            should_save = true;
+                        } else {
+                            should_save = false;
+                        }
+                    } 
+                    
+                    if should_save { // write to the path the contents, love this C like syntax
+                        fs::write(&full_path, &current_script_content)?;
+                        println!("\nAuto-Saving contents to: {:?}", full_path);
+                    }
+                
+                    //FLAGS:
+                    if diff {
+                        if !all_versions.is_empty() {
+                            let last_version = all_versions.last().unwrap();
+                            let last_content = fs::read_to_string(last_version)?;
+                            let mut diff_output = diff::compare_strs(&last_content, &current_script_content)?;
+                        
+                            if diff_output.is_empty() && all_versions.len() >= 2 {
+                                let second_last_version = &all_versions[all_versions.len() - 2];
+                                let second_last_content = fs::read_to_string(second_last_version)?;
+                                diff_output = diff::compare_strs(&second_last_content, &current_script_content)?;
+                            }
+                        
+                            if diff_output.is_empty() {
+                                println!("No changes made.");
+                            } else {
+                                println!("------changes------");
+                                println!("{}", diff_output);
+                                println!("-------------------");
+                                
+                                fs::write(&full_path, &current_script_content)?;
+    
+                                let second_date_stamp = Local::now().to_string(); 
+                                let second_json_name = format!("{}_{}.json", script_name.trim_end_matches(".py"), second_date_stamp);
+                                let second_full_path = history_dir.join(&second_json_name);
+                                fs::write(&second_full_path, &current_script_content)?;
+                
+                            }
+                        } else {
+                            println!("No prior version found to diff against.");
+                        }
+                    }
+            
+            } // end Standard Out
+            
+            // Standard Error
+             Ok((commands::OutputType::Stderr, error_output)) => { 
+
+                if !diff && !explain {
+                    println!("Error Caught! Use --explain OR --diff for help.\n"); // TODO might change
+                    println!("{}", error_output);
+                }
+            
+                //commands::start_ollama_server()?;
+                //let ollama = Ollama::default();
+
+                let mut context: Option<GenerationContext> = None; // TODO for later
+                //let pb = setup_progress_bar(100); // get the bar for explain
+                let mut stdout = tokio::io::stdout(); 
+            
+                let script_name = Path::new(script_path).file_name().unwrap().to_string_lossy().to_string();
+                let date_stamp = Local::now().to_string();
+
+                let mut history_dir: PathBuf = dirs::home_dir().expect("Failed to get home directory");
+                history_dir.push("blvflag/tool/history/err_history"); // create the err_history dir if it DOESNT EXIST
+                fs::create_dir_all(&history_dir)?;
+            
+                let json_name = format!("{}_{}.json", script_name.trim_end_matches(".py"), date_stamp); // dating format
+                let full_path = history_dir.join(&json_name); 
+                let current_script_content = fs::read_to_string(script_path)?; // stringify all contents 
+
+                let prefix = script_name.trim_end_matches(".py");
+                let mut all_versions: Vec<PathBuf> = vec![];
+            
+                    let std_history_dir = dirs::home_dir().unwrap().join("blvflag/tool/history/std_history");
+                    let std_versions = fs::read_dir(&std_history_dir)? // read the users std dir
+                        .filter_map(|entry| {
+                            let path = entry.ok()?.path();
+                            let fname = path.file_name()?.to_string_lossy();
+                            if fname.starts_with(prefix) {
+                                Some(path) 
+                            } else { 
+                                None // TODO unsure if this is good practice.
+                            }
+                        }); // end std read
+            
+                    let err_history_dir = dirs::home_dir().unwrap().join("blvflag/tool/history/err_history");
+                    let err_versions = fs::read_dir(&err_history_dir)? // read the users std out dir
+                        .filter_map(|entry| {
+                            let path = entry.ok()?.path();
+                            let fname = path.file_name()?.to_string_lossy();
+                            if fname.starts_with(prefix) { 
+                                Some(path) 
+                            } else { 
+                                None 
+                            }
+                        }); // end err read
+            
+                    all_versions.extend(std_versions); // append std
+                    all_versions.extend(err_versions); // append err
+                    all_versions.sort(); // sort to get the most recent
+            
+                    let mut should_save = true;
+                    if let Some(last_version) = all_versions.last() {
+                        let previous_content = fs::read_to_string(last_version)?; // stringify for compare
+                        if previous_content != current_script_content {
+                            should_save = true;
+                        } else {
+                            should_save = false;
+                        }
+                    } 
+                    
+                    if should_save { // write to the path the contents, love this C like syntax
+                        fs::write(&full_path, &current_script_content)?;
+                        println!("\nAuto-Saving contents to: {:?}", full_path);
+                    }
+                
+                    //FLAGS:
+
+                    if diff {
+                        if !all_versions.is_empty() {
+                            let last_version = all_versions.last().unwrap();
+                            let last_content = fs::read_to_string(last_version)?;
+                            let mut diff_output = diff::compare_strs(&last_content, &current_script_content)?;
+                        
+                            if diff_output.is_empty() && all_versions.len() >= 2 {
+                                let second_last_version = &all_versions[all_versions.len() - 2];
+                                let second_last_content = fs::read_to_string(second_last_version)?;
+                                diff_output = diff::compare_strs(&second_last_content, &current_script_content)?;
+                            }
+                        
+                            if diff_output.is_empty() {
+                                println!("No changes made.");
+                            } else {
+                                println!("------changes------");
+                                println!("{}", diff_output);
+                                println!("-------------------");
+                                
+                                fs::write(&full_path, &current_script_content)?;
+    
+                                let second_date_stamp = Local::now().to_string(); 
+                                let second_json_name = format!("{}_{}.json", script_name.trim_end_matches(".py"), second_date_stamp);
+                                let second_full_path = history_dir.join(&second_json_name);
+                                fs::write(&second_full_path, &current_script_content)?;
+                
+                            }
+                        } else {
+                            println!("No prior version found to diff against.");
+                        }
+                    }
+                    
+                    if explain { 
+
+                        //commands::start_ollama_server()?; // start the Ollama server
+                        let mut identical_diff_count = 0;
+                        let mut prev_diff: Option<String> = None;
+                    
+                        let num_versions = all_versions.len();
+                        let max_checks = 3.min(num_versions.saturating_sub(1)); // max checks are three back
+                    
+                       if num_versions >= 2 {
+                            for i in (num_versions - max_checks)..(num_versions - 1) {
+                                let older = fs::read_to_string(&all_versions[i])?;
+                                let newer = fs::read_to_string(&all_versions[i + 1])?;
+                                let diff_result = diff::compare_strs(&older, &newer)?;
+
+                                if let Some(prev) = &prev_diff {
+                                    if diff_result == *prev {
+                                        identical_diff_count += 1;
+                                    } else {
+                                        break;
+                                    }
+                                } else {
+                                    prev_diff = Some(diff_result);
+                                }
+                            }
+                        }
+                    
+                        let prompt = if identical_diff_count >= 2 { // if we have more than 2 repeats, we give this prompt
+                            format!( 
+                                "This script has failed multiple times with the same changes. Offer an alternative solution or suggest a different debugging approach. Here is the error:\n{}",
+                                error_output 
+                            )
+                        } else { // else give the original prompt
+                            format!( 
+                                "Provide the error line number and explain the error in 3-4 bullet points. Just provide the bullet points and line number:\n{}",
+                                error_output
+                            )
+                        };
+                    
+                        let api_key_path: PathBuf = dirs::home_dir()
+                            .expect("Could not find home dir")
+                            .join("blvflag/tool/key/api_key");
+
+                        let llama_api_key = fs::read_to_string(&api_key_path)
+                            .expect("Failed to read LLaMA API key")
+                            .trim()
+                            .to_string();
+
+                            let client = reqwest::Client::new();
+                            let response = client
+                                .post("https://api.llama.com/v1/chat/completions")
+                                .header("Authorization", format!("Bearer {}", llama_api_key))
+                                .header("Content-Type", "application/json")
+                                .json(&serde_json::json!({
+                                    "model": "Llama-4-Maverick-17B-128E-Instruct-FP8",
+                                    "messages": [
+                                        { "role": "system", "content": prompt },
+                                         { "role": "user", "content": error_output }
+                                    ],
+                                    "temperature": 0.7 // not sure if needed
+                                }))
+                                .send()
+                                .await?;
+
+                            let json_response: serde_json::Value = response.json().await?;
+
+                            let explanation = json_response["completion_message"]["content"]["text"]
+                                .as_str()
+                                .unwrap_or("No explanation received.")
+                                .to_string();
+
+                            println!("Error Explanation:\n{}", explanation);
+                    } // end explain
+
+            } // end stderr
+        Err(_) => {
+            eprintln!("\nFailed to execute the script. Use -help for help");
+        }
+    } // match
+
+
+    //-------------------------
+    //TODO remove after testing!
+    // TODO TODO TODO
+    let duration = start.elapsed().as_secs_f64();
+    let log_path = "/Users/rylan/blvflag/tool/logs/timings.jsonl";
+    let log_entry = json!({
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "script": script_path,
+        "duration_sec": duration
+    });
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .expect("Failed to open timing log");
+    writeln!(file, "{}", log_entry).unwrap();
+    //-------------------------
+
+    Ok(()) 
+} // end processing script
+
+/*
+pub fn setup_progress_bar(max_tokens: u64) -> ProgressBar { // same as used in setup from blvrun
+    let pb = ProgressBar::new(max_tokens);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] [{bar:40.green/white] {pos:>7}/{len:7} {msg}")
+            .expect("Failed to set progress bar template")
+            .progress_chars("#>-"),
+    );
+    pb // return the bar
+} // end setup
+
+pub async fn process_loop(stdout: &mut Stdout, ollama: &Ollama, pb: &ProgressBar, show_stream: bool, query: &str, postfix: &str, context: &mut Option<GenerationContext>,) -> Result<(), Box<dyn std::error::Error>> {
+    commands::start_ollama_server()?; // always start server
+    let mut final_output = Vec::new(); // store responses
+
+    stdout.flush().await?; // overwrite past output
+
+    let mut request = GenerationRequest::new("thisModel".into(), query.to_string()); // create the request
+    if let Some(ctx) = context.clone() { // additional context
+        request = request.context(ctx);
+    }
+    let mut stream: GenerationResponseStream = ollama.generate_stream(request).await?; // begin streaming
+
+    while let Some(Ok(res)) = stream.next().await { // loop through the response strem
+        for ele in res {
+            if show_stream {
+                stdout.write_all(ele.response.as_bytes()).await?; // print
+                stdout.flush().await?;
+            } else {
+                final_output.push(ele.response);
+                pb.inc(1); // increment progress bar
+            }
+
+            if let Some(final_data) = ele.final_data {
+                *context = Some(final_data.context); // TODO this is where we will store context, overwrite once convo is done
+            }
+        }
+    } // end while
+
+    let full_output = final_output.join(""); // TODO combine stored and current for final output
+    let full_output = format!("{}{}", postfix, full_output); // append postfix, depricated from blv run
+
+    if !show_stream {
+        pb.finish_with_message("generation complete"); // what it says
+        stdout.write_all(full_output.as_bytes()).await?;
+        stdout.flush().await?;
+    }
+
+    Ok(())
+} // end loop
+*/

@@ -1,0 +1,72 @@
+plan for the application
+
+features
+- command-line tool that wraps around python execution
+- when we get a stderr enhance using a LOCAL LLM to return better response 
+    - CPU Based
+- optimize responses for screen readers
+
+flags to be implemented
+- error explanation --explain which sends errors to the LLM for better output
+- version control similiar to VIM diff --diff
+    - essentially, if we get an error, it takes an autostored prev file
+        and compares the changes this will help for better error explanation
+        from the LLM because it will have the context of the other file.
+
+
+flag examples
+
+    toolName myscript.py --explain
+    toolName myscript.py --diff
+
+without any flags
+toolName myscript.py
+SyntaxError: unexpected...
+
+with --explain:
+toolName myscript.py --explain
+Error: SyntaxError
+Cause: You likely forgot to close a string or a block.
+Fix: Check for missing quotes or brackets.
+
+with --diff:
+toolName myscript.py --diff
+Error: NameError: name 'x' is not defined
+Previous Run: No error
+Change: You introduced an undefined variable.
+
+other notes about implementing --diff features
+
+- save stderr logs in another folder
+- each run creates a new timestamped log file (found this online somewhere)
+- then we want to ompare the latest error against the previous one.
+
+cases:
+    if the same error appears nothing new
+    if the error changes, focus on that error when feeding to LLM
+
+
+
+possible execution steps
+
+1. parse the arguments and extract python file and flags if provided
+2. run the code and capture and stderr(s)
+    = if no errors just exit normally
+3. for flags
+    --explain: send the error message to the LLM Ollama
+    --diff: take the auto save file, find changes, provide that and error message to LLM
+4. format the error outputs in ways described above
+    - note to self: find research on best formating for screen readers or ask PC
+
+implementing the LLM
+
+ask PC about how blv run did this cant figure it out
+
+- here would be the model selection
+- quantize it for CPU best performance
+- fine-tune it with QLora: https://github.com/google-research/google-research/tree/master/mbpp
+
+
+testing it
+
+tbd..

@@ -1,17 +1,12 @@
 use crate::commands;
 use crate::diff;
-use crate::setup::ensure_dirs;
-
-
-//Old Graphing Approach
-//use crate::graph::ErrorGraph; 
+use crate::buckets;
 
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 use chrono::Local;
 use dirs_next;
-
 
 /* metric testing
 use std::time::Instant;
@@ -20,8 +15,7 @@ use std::io::Write;
 use serde_json::json;
 */
 
-pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert: bool,) -> Result<(), Box<dyn Error>> {
-    ensure_dirs()?;
+pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert: bool, context: bool,) -> Result<(), Box<dyn Error>> {
     let out = commands::run_script(script_path);
 
     /* metric testing
@@ -29,19 +23,13 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
     */
 
     match out {
-
             //Standard Out
             Ok((commands::OutputType::Stdout, output)) => { 
 
                 if !diff { println!("{}", output); } // if we dont have a flag just give back
-        
-                // Old Graphing Approach
-                //let mut graph = ErrorGraph::load_or_new(script_path);
-                //graph.add_state(&output, true);  
-                //graph.save()?;
 
                 let script_name = Path::new(script_path).file_name().unwrap().to_string_lossy().to_string();
-                let date_stamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+                let date_stamp = Local::now().to_string();
 
                 let mut history_dir: PathBuf = dirs_next::home_dir().expect("Failed to get home directory");
                 history_dir.push("blvflag/tool/history/std_history"); // create the std_history dir if it DOESNT EXIST
@@ -50,6 +38,19 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
                 let json_name = format!("{}_{}.json", script_name.trim_end_matches(".py"), date_stamp); // dating format
                 let full_path = history_dir.join(&json_name); 
                 let current_script_content = fs::read_to_string(script_path)?; // stringify all contents 
+
+                 // Hashing Logic
+                if let Some(error_type) = find_last_error_type(&script_name) { // matches to write to proper cycle
+                    let _ = buckets::record_run(
+                        &error_type,
+                        &script_name,
+                        &current_script_content,
+                        false, // is_error
+                        true,  // is_fixed
+                    );
+                 }
+                 // ---
+
 
                 /*
                     Here we are going to read through both of the history sub dirs, std_history & err_history.
@@ -143,7 +144,7 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
                                 
                                 fs::write(&full_path, &current_script_content)?;
     
-                                let second_date_stamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+                                let second_date_stamp = Local::now().to_string(); 
                                 let second_json_name = format!("{}_{}.json", script_name.trim_end_matches(".py"), second_date_stamp);
                                 let second_full_path = history_dir.join(&second_json_name);
                                 fs::write(&second_full_path, &current_script_content)?;
@@ -153,7 +154,6 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
                             println!("No prior version found to diff against.");
                         }
                     }
-            
             } // end Standard Out -------------------------------
             
             // Standard Error
@@ -163,14 +163,9 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
                     println!("Error Caught! Use --explain OR --diff for help.\n"); // TODO might change
                     println!("{}", error_output);
                 }
-
-                // Old Graphing Approach
-                //let mut graph = ErrorGraph::load_or_new(script_path);
-                //graph.add_state(&error_output, false);
-                //graph.save()?;
             
                 let script_name = Path::new(script_path).file_name().unwrap().to_string_lossy().to_string();
-                let date_stamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+                let date_stamp = Local::now().to_string();
 
                 let mut history_dir: PathBuf = dirs_next::home_dir().expect("Failed to get home directory");
                 history_dir.push("blvflag/tool/history/err_history"); // create the err_history dir if it DOESNT EXIST
@@ -179,6 +174,23 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
                 let json_name = format!("{}_{}.json", script_name.trim_end_matches(".py"), date_stamp); // dating format
                 let full_path = history_dir.join(&json_name); 
                 let current_script_content = fs::read_to_string(script_path)?; // stringify all contents 
+
+                // Hashing Logic ---
+                fn get_error(stderr: &str) -> String {
+                    stderr.lines().rev().find(|line| line.contains(':')).and_then(|line| line
+                        .split(':').next()).unwrap_or("UnknownError").trim().to_string()
+                }                                  // TODO - Bucket.rs
+                                                    
+                let error_type = get_error(&error_output); // find what we've got
+
+                let _ = buckets::record_run(
+                    &error_type,
+                    &script_name,
+                    &current_script_content,
+                    true,   // is_error
+                    false,  // is_fixed
+                );
+                // ---
 
                 let prefix = script_name.trim_end_matches(".py");
                 let mut all_versions: Vec<PathBuf> = vec![];
@@ -266,7 +278,7 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
                                 
                                 fs::write(&full_path, &current_script_content)?;
     
-                                let second_date_stamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+                                let second_date_stamp = Local::now().to_string(); 
                                 let second_json_name = format!("{}_{}.json", script_name.trim_end_matches(".py"), second_date_stamp);
                                 let second_full_path = history_dir.join(&second_json_name);
                                 fs::write(&second_full_path, &current_script_content)?;
@@ -358,6 +370,43 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
                             println!("Error Explanation:\n{}", explanation);
                     } // end explain
 
+
+                    if context {
+                        /*
+                            1. Hash to get context
+                            2. Pass to LLM like above
+                        */
+
+                        /*
+                            let prompt = 
+                                format!(
+                                "A blind low-vision developer is struggling to fix an error. If they have fixed this error before 
+                                development steps will be provided. If they have not fixed this error before this will be labeled below.
+                                
+                                CURRENT ERROR:
+                                Error Type: {{CURRENT_ERROR_TYPE}}
+                                Error Message: {{CURRENT_ERROR_MESSAGE}}
+
+                                CURRENT SCRIPT CONTENTS:
+                                {{FULL SCRIPT CONTENTS}}
+
+                                PREVIOUSLY FIXED SCRIPTS
+                                Below is a list of development cycles where this user fixed, {{CURRENT_ERROR_TYPE}}
+                                CYCLES:
+                                {{HISTORICAL_FIXED_RUN_CONTENTS}} 
+                                {{HISTORICAL_FIXED_RUN_CONTENTS}}  
+                                    . . . 
+
+                                YOUR TASK
+                                * IN A SCREEN-READER FRIENDLY FORMAT, speaking to the USER (you did this , you should do this)* 
+                                * IN SIMPLE & SHORT BULLET POINTS *
+                                1. Explain what is causing the current error.
+                                2. Describe how the user fixed this error in previous scripts (IF APPLICABLE)
+                                3. Suggest hints in order to fix the CURRENT ERROR PRODUCING SCRIPT, without providing the answer."    
+                                );
+                        */
+                    } // end context
+
             } // end stderr match block -------------------------------
         Err(_) => {
             eprintln!("\nFailed to execute the script. Use -help for help");
@@ -382,4 +431,48 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
     */            
                             
     Ok(()) 
-} // end processing script and file
+} // end processing script
+
+ // Error Collection & Hashing
+fn find_last_error_type(script_name: &str) -> Option<String> {
+    let mut root = dirs_next::home_dir()?;
+    root.push("blvflag/tool/buckets");
+
+    // get all error types within the bucket dir
+    let entries = fs::read_dir(&root).ok()?;
+
+    for entry in entries.flatten() {
+        let error_type = entry.file_name().to_string_lossy().to_string();
+        // find the associated script
+        let script_dir = entry.path().join(script_name.trim_end_matches(".py")); 
+
+        if !script_dir.exists() {
+            continue;
+        }
+
+        // collect all developmetn cycles for the script
+        let mut cycles: Vec<PathBuf> = fs::read_dir(&script_dir)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().map(|e| e == "json").unwrap_or(false))
+            .collect();
+
+        cycles.sort();
+
+        // find the last, this is the one to be udpated
+        if let Some(last_cycle) = cycles.last() {
+            let data = fs::read_to_string(last_cycle).ok()?;
+            let runs: Vec<buckets::RunRecord> =
+                serde_json::from_str(&data).ok()?;
+
+            if runs.last().map(|r| !r.is_fixed).unwrap_or(false) {
+                return Some(error_type);
+            }
+        }
+    }
+    None // either no cycles or all cycles are in a FIXED state. 
+         // (logic in buckets.rs will create new cycle in this case)
+} // end error type
+
+// end file.

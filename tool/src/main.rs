@@ -2,18 +2,12 @@ mod generate;
 mod commands;
 mod setup;
 mod diff;
-
-
-//Old Graphing Approach
-//mod graph;
-
+mod buckets;
 
 use clap::{App, Arg, SubCommand};
-use crate::setup::ensure_dirs;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ensure_dirs()?;
     let matches = App::new("blvflag")
         .usage("blvflag [scriptName.py] [--flag]")
         .arg(Arg::new("script")  
@@ -23,6 +17,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(Arg::new("explain") 
             .long("explain")      
             .help("Utlized to explain error messages in more verbose manner.")
+            .takes_value(false))  
+        .arg(Arg::new("context")
+            .long("context")
+            .help("Utilized to explain error messages using stored development cycles for added context.")
             .takes_value(false))  
         .arg(Arg::new("diff")
             .long("diff")
@@ -41,10 +39,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get_matches();
 
         if let Some(script) = matches.value_of("script") { 
-            let explain = matches.is_present("explain"); // booleans
+            let explain = matches.is_present("explain");
             let diff = matches.is_present("diff");
             let revert = matches.is_present("revert");
-            generate::process_script(script, explain, diff, revert).await?;
+            let context = matches.is_present("context");
+            generate::process_script(script, explain, diff, revert, context).await?;
         } else if matches.subcommand_matches("setup").is_some() {
             setup::setup_model().await?;
         } else if matches.subcommand_matches("clear").is_some() {

@@ -1,6 +1,7 @@
 use crate::commands;
 use crate::diff;
 use crate::buckets;
+use crate::model;
 
 use std::error::Error;
 use std::fs;
@@ -40,7 +41,7 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
                 let current_script_content = fs::read_to_string(script_path)?; // stringify all contents 
 
                  // Hashing Logic
-                if let Some(error_type) = find_last_error_type(&script_name) { // matches to write to proper cycle
+                if let Some(error_type) = buckets::find_last_error_type(&script_name) { // matches to write to proper cycle
                     let _ = buckets::record_run(
                         &error_type,
                         &script_name,
@@ -159,7 +160,7 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
             // Standard Error
              Ok((commands::OutputType::Stderr, error_output)) => { 
 
-                if !diff && !explain {
+                if !diff && !explain && !context {
                     println!("Error Caught! Use --explain OR --diff for help.\n"); // TODO might change
                     println!("{}", error_output);
                 }
@@ -329,84 +330,104 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
                                 error_output
                             )
                         };
-                    
-                        let api_key_path: PathBuf = dirs_next::home_dir()
-                            .expect("Could not find home dir") // first we get the api key from the folder we setup
-                            .join("blvflag/tool/key/api_key");
-
-                        if !api_key_path.exists() {
-                            println!("\nCannot run --explain! Missing API key file at {:?}", api_key_path);
-                            println!("Run `blvflag setup` to initialize API key file. Or help.\n");
-                            return Ok(()); 
-                        }
-                        
-                        let llama_api_key = fs::read_to_string(&api_key_path) 
-                            .expect("Failed to read API key")
-                            .trim()
-                            .to_string(); 
-
-                            let client = reqwest::Client::new();
-                            let response = client // set up like in docuemntations, did have to modify for HTTP requests
-                                .post("https://api.llama.com/v1/chat/completions") 
-                                .header("Authorization", format!("Bearer {}", llama_api_key))
-                                .header("Content-Type", "application/json") // its a JSON format
-                                .json(&serde_json::json!({
-                                    "model": "Llama-4-Maverick-17B-128E-Instruct-FP8", // same as PC's stuff
-                                    "messages": [
-                                        { "role": "system", "content": prompt }, // system uses the prompt we generate above
-                                         { "role": "user", "content": error_output } // user gives the error
-                                    ],
-                                }))
-                                .send()
-                                .await?;
-
-                            let json_response: serde_json::Value = response.json().await?;
-
-                            let explanation = json_response["completion_message"]["content"]["text"] // now we parse the json in this format
-                                .as_str()
-                                .unwrap_or("Error communicating with Llama! \n Check ~/blvflag/tool/key/api_key OR run setup.") // incase we recieve nothing we alert
-                                .to_string();
-
+                            // call model
+                            let explanation = model::call_llm(prompt).await?;
                             println!("Error Explanation:\n{}", explanation);
+
                     } // end explain
 
-
                     if context {
-                        /*
-                            1. Hash to get context
-                            2. Pass to LLM like above
-                        */
 
-                        /*
-                            let prompt = 
-                                format!(
-                                "A blind low-vision developer is struggling to fix an error. If they have fixed this error before 
-                                development steps will be provided. If they have not fixed this error before this will be labeled below.
-                                
-                                CURRENT ERROR:
-                                Error Type: {{CURRENT_ERROR_TYPE}}
-                                Error Message: {{CURRENT_ERROR_MESSAGE}}
+                        let current_error_type = error_type.clone(); // error type we have
+                        let current_error_message = error_output.clone(); // error message we have
+                        let current_script_contents = current_script_content.clone();
 
-                                CURRENT SCRIPT CONTENTS:
-                                {{FULL SCRIPT CONTENTS}}
+                        let fixed_cycles = buckets::fixed_cycles(&current_error_type);
 
-                                PREVIOUSLY FIXED SCRIPTS
-                                Below is a list of development cycles where this user fixed, {{CURRENT_ERROR_TYPE}}
-                                CYCLES:
-                                {{HISTORICAL_FIXED_RUN_CONTENTS}} 
-                                {{HISTORICAL_FIXED_RUN_CONTENTS}}  
-                                    . . . 
+                        if fixed_cycles.is_empty() {
+                            // FALL BACK TO BASIC --explain LOGIC
+                           let prompt = format!(
+                                "Provide the error line number and explain in a compact screen readable format for \
+                                blind-low-vision programmers. Here is the error:\n{}",
+                                error_output
+                            );
+                            let explanation = model::call_llm(prompt).await?;
+                            println!("No Context Found!\n\nFalling Back to --explain:\n{}", explanation);
+                        } else {
+                            // assemble the development cycles for context
+                            let mut historical_fixed_run_contents = String::new();
+                            for (_cycle_idx, cycle) in fixed_cycles.iter().enumerate() {
+                                for run in cycle {
+                                    historical_fixed_run_contents.push_str(
+                                        &format!("\n[Run | is_error: {} | is_fixed: {}]\n{}\n",
+                                            run.is_error, run.is_fixed, run.run_contents)
+                                    );
+                                }
+                            }
 
-                                YOUR TASK
-                                * IN A SCREEN-READER FRIENDLY FORMAT, speaking to the USER (you did this , you should do this)* 
-                                * IN SIMPLE & SHORT BULLET POINTS *
-                                1. Explain what is causing the current error.
-                                2. Describe how the user fixed this error in previous scripts (IF APPLICABLE)
-                                3. Suggest hints in order to fix the CURRENT ERROR PRODUCING SCRIPT, without providing the answer."    
-                                );
-                        */
+                            // build out the LLM prompt
+                           let prompt = format!(
+                                "You are assisting a blind or low-vision programmer.
+
+                                IMPORTANT OUTPUT RULES (MUST FOLLOW):
+                                - Use CLEAR SECTION HEADERS
+                                - Use SHORT BULLET POINTS (1 sentence each)
+                                - NO PARAGRAPHS
+                                - Speak directly to the user (\"you did\", \"you should\")
+                                - Do NOT repeat the full script unless necessary
+                                - Do NOT provide the full solution, only hints
+
+                                ====================
+                                CURRENT ERROR
+                                ====================
+                                Error type:
+                                {error_type}
+
+                                Error message:
+                                {error_message}
+
+                                ====================
+                                CURRENT SCRIPT
+                                ====================
+                                {current_script}
+
+                                ====================
+                                PREVIOUS FIXED CYCLES
+                                ====================
+                                Below are past development cycles where you successfully fixed this SAME error type.
+                                Each cycle shows your changes over time.
+
+                                {historical_cycles}
+
+                                ====================
+                                RESPONSE FORMAT
+                                ====================
+
+                                WHAT IS GOING WRONG
+                                - Explain the root cause in simple terms
+                                - Focus on *why* Python is raising this error
+
+                                WHAT YOU DID BEFORE
+                                - Summarize how you fixed this error in past scripts
+                                - If no past fix exists, say: \"You have not fixed this error before.\"
+
+                                WHAT TO TRY NEXT
+                                - Give 2–4 short hints
+                                - Do NOT give the final answer
+                                - Focus on reasoning, not syntax
+
+                                BEGIN RESPONSE NOW.",
+                                        error_type = current_error_type,
+                                        error_message = current_error_message,
+                                        current_script = current_script_contents,
+                                        historical_cycles = historical_fixed_run_contents
+                            );
+
+                            // call model
+                            let context = model::call_llm(prompt).await?;
+                            println!("{}", context);
+                        }
                     } // end context
-
             } // end stderr match block -------------------------------
         Err(_) => {
             eprintln!("\nFailed to execute the script. Use -help for help");
@@ -432,47 +453,4 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
                             
     Ok(()) 
 } // end processing script
-
- // Error Collection & Hashing
-fn find_last_error_type(script_name: &str) -> Option<String> {
-    let mut root = dirs_next::home_dir()?;
-    root.push("blvflag/tool/buckets");
-
-    // get all error types within the bucket dir
-    let entries = fs::read_dir(&root).ok()?;
-
-    for entry in entries.flatten() {
-        let error_type = entry.file_name().to_string_lossy().to_string();
-        // find the associated script
-        let script_dir = entry.path().join(script_name.trim_end_matches(".py")); 
-
-        if !script_dir.exists() {
-            continue;
-        }
-
-        // collect all developmetn cycles for the script
-        let mut cycles: Vec<PathBuf> = fs::read_dir(&script_dir)
-            .ok()?
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().map(|e| e == "json").unwrap_or(false))
-            .collect();
-
-        cycles.sort();
-
-        // find the last, this is the one to be udpated
-        if let Some(last_cycle) = cycles.last() {
-            let data = fs::read_to_string(last_cycle).ok()?;
-            let runs: Vec<buckets::RunRecord> =
-                serde_json::from_str(&data).ok()?;
-
-            if runs.last().map(|r| !r.is_fixed).unwrap_or(false) {
-                return Some(error_type);
-            }
-        }
-    }
-    None // either no cycles or all cycles are in a FIXED state. 
-         // (logic in buckets.rs will create new cycle in this case)
-} // end error type
-
 // end file.

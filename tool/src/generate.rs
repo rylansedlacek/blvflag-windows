@@ -191,6 +191,9 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
                     true,   // is_error
                     false,  // is_fixed
                 );
+
+                let auto_context = buckets::identical_error(&error_type, &script_name);
+
                 // ---
 
                 let prefix = script_name.trim_end_matches(".py");
@@ -290,8 +293,7 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
                         }
                     }
                     
-                    if explain { 
-
+                    if explain {         
                         let mut identical_diff_count = 0;
                         let mut prev_diff: Option<String> = None;
                     
@@ -336,7 +338,12 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
 
                     } // end explain
 
-                    if context {
+                    let fixed_cycles = buckets::fixed_cycles(&error_type);
+
+                    let manual_context = context;
+                    let automatic_context = auto_context && !fixed_cycles.is_empty();
+
+                    if manual_context || automatic_context {
 
                         let current_error_type = error_type.clone(); // error type we have
                         let current_error_message = error_output.clone(); // error message we have
@@ -344,7 +351,7 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
 
                         let fixed_cycles = buckets::fixed_cycles(&current_error_type);
 
-                        if fixed_cycles.is_empty() {
+                        if fixed_cycles.is_empty() && manual_context {
                             // FALL BACK TO BASIC --explain LOGIC
                            let prompt = format!(
                                 "Provide the error line number and explain in a compact screen readable format for \
@@ -357,13 +364,34 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
                             // assemble the development cycles for context
                             let mut historical_fixed_run_contents = String::new();
                             for (_cycle_idx, cycle) in fixed_cycles.iter().enumerate() {
-                                for run in cycle {
-                                    historical_fixed_run_contents.push_str(
-                                        &format!("\n[Run | is_error: {} | is_fixed: {}]\n{}\n",
-                                            run.is_error, run.is_fixed, run.run_contents)
-                                    );
+                            
+                                if cycle.len() < 2 {
+                                    continue;
                                 }
-                            }
+
+                                let pre_fix = &cycle[cycle.len() - 2];
+                                let fixed = &cycle[cycle.len() - 1];
+                                
+                                // pass state before fix
+                                historical_fixed_run_contents.push_str(
+                                    &format!(
+                                        "\n[before fix | is_error: {} | is_fixed: {}]\n{}\n",
+                                        pre_fix.is_error,
+                                        pre_fix.is_fixed,
+                                        pre_fix.run_contents
+                                    )
+                                );
+
+                                // pass fixed state
+                                historical_fixed_run_contents.push_str(
+                                    &format!(
+                                        "\n[after fix | is_error: {} | is_fixed: {}]\n{}\n",
+                                        fixed.is_error,
+                                        fixed.is_fixed,
+                                        fixed.run_contents
+                                    )
+                                );
+                             }
 
                             // build out the LLM prompt
                            let prompt = format!(
@@ -394,9 +422,17 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
                                 ====================
                                 PREVIOUS FIXED CYCLES
                                 ====================
-                                Below are past development cycles where you successfully fixed this SAME error type.
-                                Each cycle shows your changes over time.
+                                Below are past development cycles where you fixed this SAME error type.
+                                Each cycle shows:
+                                - The state BEFORE the fix
+                                - The state AFTER the fix
 
+                                IMPORTANT:
+                                - Compare the CURRENT SCRIPT to the *BEFORE* state of each cycle
+                                - Identify which cycle is MOST SIMILAR to the current script
+                                - Prefer fixes that required the SMALLEST conceptual change
+                                - Ignore fixes that involve unrelated variables or logic
+                                
                                 {historical_cycles}
 
                                 ====================
@@ -425,7 +461,11 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
 
                             // call model
                             let context = model::call_llm(prompt).await?;
-                            println!("{}", context);
+                            if auto_context && !manual_context {
+                                println!("AUTO CONTEXT:\n\n {}", context);
+                            } else {
+                                println!("{}", context);
+                            }
                         }
                     } // end context
             } // end stderr match block -------------------------------

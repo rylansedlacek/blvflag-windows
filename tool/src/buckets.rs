@@ -145,4 +145,49 @@ pub fn fixed_cycles(error_type: &str) -> Vec<Vec<RunRecord>> {
     recovered
 }
 
+pub fn identical_error (error_type: &str, script_name: &str) -> bool {
+    let mut base = match dirs_next::home_dir() {
+        Some(p) => p,
+        None => return false,
+    };
+
+    base.push("blvflag/tool/buckets");
+    base.push(error_type);
+    base.push(script_name.trim_end_matches(".py"));
+
+     let mut cycles: Vec<PathBuf> = match fs::read_dir(&base) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().map(|e| e == "json").unwrap_or(false))
+            .collect(),
+        Err(_) => return false,
+    };
+
+    cycles.sort();
+
+    let last_cycle_path = match cycles.last() {
+        Some(p) => p,
+        None => return false,
+    };
+
+    let data = match fs::read_to_string(last_cycle_path) {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+
+    let runs: Vec<RunRecord> = match serde_json::from_str(&data) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+
+    if runs.len() < 2 { return false;}
+
+    let last = &runs[runs.len() - 1];
+    let prev = &runs[runs.len() - 2];
+
+    last.is_error && prev.is_error && last.run_contents == prev.run_contents
+}
+
+
 // end file.

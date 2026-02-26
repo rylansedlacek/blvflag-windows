@@ -18,3 +18,11 @@ pub fn compare_strs(old: &str, new: &str) -> std::io::Result<String> {
 
     Ok(output) // return
 }
+
+pub fn count_changes(old: &str, new: &str) -> usize {
+    let diff = TextDiff::from_lines(old, new);
+
+    diff.iter_all_changes()
+        .filter(|c| matches!(c.tag(), ChangeTag::Delete | ChangeTag::Insert))
+        .count()
+}

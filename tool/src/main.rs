@@ -4,6 +4,7 @@ mod setup;
 mod diff;
 mod buckets;
 mod model;
+mod ranking;
 
 use clap::{App, Arg, SubCommand};
 

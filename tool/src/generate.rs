@@ -2,6 +2,7 @@ use crate::commands;
 use crate::diff;
 use crate::buckets;
 use crate::model;
+use crate::ranking;
 
 use std::error::Error;
 use std::fs;
@@ -338,136 +339,122 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
 
                     } // end explain
 
-                    let fixed_cycles = buckets::fixed_cycles(&error_type);
-
-                    let manual_context = context;
-                    let automatic_context = auto_context && !fixed_cycles.is_empty();
+                   //context checks
+                   let fixed_cycles = buckets::fixed_cycles(&error_type);
+                   let manual_context = context;
+                   let automatic_context = auto_context && !fixed_cycles.is_empty();
 
                     if manual_context || automatic_context {
-
-                        let current_error_type = error_type.clone(); // error type we have
-                        let current_error_message = error_output.clone(); // error message we have
-                        let current_script_contents = current_script_content.clone();
-
-                        let fixed_cycles = buckets::fixed_cycles(&current_error_type);
-
-                        if fixed_cycles.is_empty() && manual_context {
-                            // FALL BACK TO BASIC --explain LOGIC
-                           let prompt = format!(
+                        // NO FIXED - explain fall back
+                        if fixed_cycles.is_empty() {
+                            let prompt = format!(
                                 "Provide the error line number and explain in a compact screen readable format for \
                                 blind-low-vision programmers. Here is the error:\n{}",
                                 error_output
                             );
+
                             let explanation = model::call_llm(prompt).await?;
                             println!("No Context Found!\n\nFalling Back to --explain:\n{}", explanation);
+                            return Ok(());
+                        }
+
+                        // 1 get the specific error producing line
+                        let error_line_number = ranking::extract_error_line_number(&error_output);
+
+                        let failing_line = if let Some(line_num) = error_line_number {
+                            ranking::get_line_from_script(&current_script_content, line_num)
+                                .unwrap_or_else(|| "".to_string())
                         } else {
-                            // assemble the development cycles for context
-                            let mut historical_fixed_run_contents = String::new();
-                            for (_cycle_idx, cycle) in fixed_cycles.iter().enumerate() {
-                            
-                                if cycle.len() < 2 {
-                                    continue;
-                                }
+                            "".to_string()
+                        };
 
-                                let pre_fix = &cycle[cycle.len() - 2];
-                                let fixed = &cycle[cycle.len() - 1];
-                                
-                                // pass state before fix
-                                historical_fixed_run_contents.push_str(
-                                    &format!(
-                                        "\n[before fix | is_error: {} | is_fixed: {}]\n{}\n",
-                                        pre_fix.is_error,
-                                        pre_fix.is_fixed,
-                                        pre_fix.run_contents
-                                    )
-                                );
-
-                                // pass fixed state
-                                historical_fixed_run_contents.push_str(
-                                    &format!(
-                                        "\n[after fix | is_error: {} | is_fixed: {}]\n{}\n",
-                                        fixed.is_error,
-                                        fixed.is_fixed,
-                                        fixed.run_contents
-                                    )
-                                );
-                             }
-
-                            // build out the LLM prompt
-                           let prompt = format!(
-                                "You are assisting a blind or low-vision programmer.
-
-                                IMPORTANT OUTPUT RULES (MUST FOLLOW):
-                                - Use CLEAR SECTION HEADERS
-                                - Use SHORT BULLET POINTS (1 sentence each)
-                                - NO PARAGRAPHS
-                                - Speak directly to the user (\"you did\", \"you should\")
-                                - Do NOT repeat the full script unless necessary
-                                - Do NOT provide the full solution, only hints
-
-                                ====================
-                                CURRENT ERROR
-                                ====================
-                                Error type:
-                                {error_type}
-
-                                Error message:
-                                {error_message}
-
-                                ====================
-                                CURRENT SCRIPT
-                                ====================
-                                {current_script}
-
-                                ====================
-                                PREVIOUS FIXED CYCLES
-                                ====================
-                                Below are past development cycles where you fixed this SAME error type.
-                                Each cycle shows:
-                                - The state BEFORE the fix
-                                - The state AFTER the fix
-
-                                IMPORTANT:
-                                - Compare the CURRENT SCRIPT to the *BEFORE* state of each cycle
-                                - Identify which cycle is MOST SIMILAR to the current script
-                                - Prefer fixes that required the SMALLEST conceptual change
-                                - Ignore fixes that involve unrelated variables or logic
-                                
-                                {historical_cycles}
-
-                                ====================
-                                RESPONSE FORMAT
-                                ====================
-
-                                WHAT IS GOING WRONG
-                                - Explain the root cause in simple terms
-                                - Focus on *why* Python is raising this error
-
-                                WHAT YOU DID BEFORE
-                                - Summarize how you fixed this error in past scripts
-                                - If no past fix exists, say: \"You have not fixed this error before.\"
-
-                                WHAT TO TRY NEXT
-                                - Give 2–4 short hints
-                                - Do NOT give the final answer
-                                - Focus on reasoning, not syntax
-
-                                BEGIN RESPONSE NOW.",
-                                        error_type = current_error_type,
-                                        error_message = current_error_message,
-                                        current_script = current_script_contents,
-                                        historical_cycles = historical_fixed_run_contents
+                        // 2 get the ranking of associated cycles
+                        let ranked_cycles = ranking::generate_ranking(
+                            &failing_line,
+                            &current_script_content,
+                            fixed_cycles,
+                        );
+                        
+                        // NO RANKED - explain fall back
+                        if ranked_cycles.is_empty() {
+                            let prompt = format!(
+                                "Provide the error line number and explain in a compact screen readable format for \
+                                blind-low-vision programmers. Here is the error:\n{}",
+                                error_output
                             );
 
-                            // call model
-                            let context = model::call_llm(prompt).await?;
-                            if auto_context && !manual_context {
-                                println!("AUTO CONTEXT:\n\n {}", context);
-                            } else {
-                                println!("{}", context);
-                            }
+                            let explanation = model::call_llm(prompt).await?;
+                            println!("No Relevant Context Found!\n\nFalling Back to --explain:\n{}", explanation);
+                            return Ok(());
                         }
-                    } // end context
+
+                        // 3 take top two rankigns only
+                        let top_cycles = ranked_cycles.into_iter().take(2);
+                        let mut historical_fixed_run_contents = String::new();
+
+                        // 4 - process and prepare for the llm prompt
+                        for cycle in top_cycles {
+                            if cycle.len() < 2 { continue; }
+
+                            let pre_fix = &cycle[cycle.len() - 2];
+                            let fixed = &cycle[cycle.len() - 1];
+
+                            historical_fixed_run_contents.push_str(
+                                &format!("\n[before fix]\n{}\n", pre_fix.run_contents)
+                            );
+
+                            historical_fixed_run_contents.push_str(
+                                &format!("\n[after fix]\n{}\n", fixed.run_contents)
+                            );
+                        }
+
+                       let prompt = format!(
+                            "You are assisting a blind or low-vision programmer.\n\
+                            IMPORTANT OUTPUT RULES (MUST FOLLOW):\n\
+                            - Use CLEAR SECTION HEADERS\n\
+                            - Use SHORT BULLET POINTS\n\
+                            - NO PARAGRAPHS\n\
+                            - Speak directly to the user\n\
+                            - Do NOT provide the full solution\n\
+                            ====================\n\
+                            CURRENT ERROR\n\
+                            ====================\n\
+                            Error type:\n\
+                            {error_type}\n\
+                            Error message:\n\
+                            {error_message}\n\
+                            ====================\n\
+                            CURRENT SCRIPT\n\
+                            ====================\n\
+                            {current_script}\n\
+                            ====================\n\
+                            RELEVANT PREVIOUS FIXES\n\
+                            ====================\n\
+                            {historical_cycles}\n\
+                            ====================\n\
+                            RESPONSE FORMAT\n\
+                            ====================\n\
+                            WHAT IS GOING WRONG\n\
+                            - Explain root cause\n\
+                            WHAT YOU DID BEFORE\n\
+                            - Summarize previous fix\n\
+                            WHAT TO TRY NEXT\n\
+                            - 2–4 short hints\n\
+                            BEGIN RESPONSE NOW.",
+                                    error_type = error_type,
+                                    error_message = error_output,
+                                    current_script = current_script_content,
+                                    historical_cycles = historical_fixed_run_contents
+                        );
+
+                        let context_response = model::call_llm(prompt).await?;
+
+                        if auto_context && !manual_context {
+                            println!("Automatic Context:\n\n{}", context_response);
+                        } else {
+                            println!("Context:\n\n{}", context_response);
+                        }
+                    }
             } // end stderr match block -------------------------------
         Err(_) => {
             eprintln!("\nFailed to execute the script. Use -help for help");

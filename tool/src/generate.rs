@@ -9,6 +9,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use chrono::Local;
 use dirs_next;
+use crate::setup::ensure_dirs;
+
 
 /* metric testing
 use std::time::Instant;
@@ -24,6 +26,8 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
     let start = Instant::now();
     */
 
+    ensure_dirs()?;
+
     match out {
             //Standard Out
             Ok((commands::OutputType::Stdout, output)) => { 
@@ -31,7 +35,7 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
                 if !diff { println!("{}", output); } // if we dont have a flag just give back
 
                 let script_name = Path::new(script_path).file_name().unwrap().to_string_lossy().to_string();
-                let date_stamp = Local::now().to_string();
+                let date_stamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
 
                 let mut history_dir: PathBuf = dirs_next::home_dir().expect("Failed to get home directory");
                 history_dir.push("blvflag/tool/history/std_history"); // create the std_history dir if it DOESNT EXIST
@@ -146,7 +150,7 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
                                 
                                 fs::write(&full_path, &current_script_content)?;
     
-                                let second_date_stamp = Local::now().to_string(); 
+                                let second_date_stamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
                                 let second_json_name = format!("{}_{}.json", script_name.trim_end_matches(".py"), second_date_stamp);
                                 let second_full_path = history_dir.join(&second_json_name);
                                 fs::write(&second_full_path, &current_script_content)?;
@@ -167,7 +171,7 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
                 }
             
                 let script_name = Path::new(script_path).file_name().unwrap().to_string_lossy().to_string();
-                let date_stamp = Local::now().to_string();
+                 let date_stamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
 
                 let mut history_dir: PathBuf = dirs_next::home_dir().expect("Failed to get home directory");
                 history_dir.push("blvflag/tool/history/err_history"); // create the err_history dir if it DOESNT EXIST
@@ -283,7 +287,7 @@ pub async fn process_script(script_path: &str, explain: bool, diff: bool, revert
                                 
                                 fs::write(&full_path, &current_script_content)?;
     
-                                let second_date_stamp = Local::now().to_string(); 
+                                let second_date_stamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
                                 let second_json_name = format!("{}_{}.json", script_name.trim_end_matches(".py"), second_date_stamp);
                                 let second_full_path = history_dir.join(&second_json_name);
                                 fs::write(&second_full_path, &current_script_content)?;

@@ -56,8 +56,8 @@ pub fn record_run(error_type: &str, script_name: &str, run_contents: &str,
 
     // append new run to the cycle
     runs.push(RunRecord {
-        run_id: format!("run_{}", Local::now().timestamp()),
-        timestamp: Local::now().to_rfc3339(),
+        run_id: format!("run_{}", Local::now().format("%Y%m%d_%H%M%S")),
+        timestamp: Local::now().format("%Y%m%d_%H%M%S").to_string(),
         run_contents: run_contents.to_string(),
         is_error,
         is_fixed,

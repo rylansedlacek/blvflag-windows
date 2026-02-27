@@ -7,9 +7,11 @@ mod model;
 mod ranking;
 
 use clap::{App, Arg, SubCommand};
+use crate::setup::ensure_dirs;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ensure_dirs()?;
     let matches = App::new("blvflag")
         .usage("blvflag [scriptName.py] [--flag]")
         .arg(Arg::new("script")  
